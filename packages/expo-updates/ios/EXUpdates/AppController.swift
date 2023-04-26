@@ -37,9 +37,15 @@ public protocol AppControllerDelegate: AnyObject {
 public class AppController: NSObject, AppLoaderTaskDelegate, ErrorRecoveryDelegate {
   private static let ErrorDomain = "EXUpdatesAppController"
 
-  private static let UpdateAvailableEventName = "updateAvailable"
-  private static let NoUpdateAvailableEventName = "noUpdateAvailable"
-  private static let ErrorEventName = "error"
+  public static let UpdateAvailableEventName = "updateAvailable"
+  public static let NoUpdateAvailableEventName = "noUpdateAvailable"
+  public static let ErrorEventName = "error"
+  public static let DownloadStartEventName = "downloadStart"
+  public static let DownloadCompleteEventName = "downloadComplete"
+  public static let DownloadAssetEventName = "downloadAsset"
+
+  public static let UpdateEventNotificationName = "EXUpdates_UpdateEventNotification"
+  public static let CheckForUpdateNotificationName = "EXUpdates_CheckForUpdateNotification"
 
   /**
    Delegate which will be notified when EXUpdates has an update ready to launch and
@@ -238,6 +244,8 @@ public class AppController: NSObject, AppLoaderTaskDelegate, ErrorRecoveryDelega
     isStarted = true
 
     purgeUpdatesLogsOlderThanOneDay()
+    initializeUpdateEventNotificationHandler()
+    initializeCheckForUpdateNotificationHandler()
 
     do {
       try initializeUpdatesDirectory()
@@ -326,6 +334,45 @@ public class AppController: NSObject, AppLoaderTaskDelegate, ErrorRecoveryDelega
 
   public func launchedUpdate() -> Update? {
     return launcher?.launchedUpdate
+  }
+
+  // MARK: - Notifications for checkForUpdate
+  private func initializeCheckForUpdateNotificationHandler() {
+    NotificationCenter.default.addObserver(self, selector: #selector(handleCheckForUpdateNotification(notification:)), name: Notification.Name(AppController.CheckForUpdateNotificationName), object: nil)
+  }
+
+  public func handleCheckForUpdateNotification(notification: Notification) {
+    UpdatesUtils.checkForUpdate(nil) { _ in }
+  }
+
+  public func postCheckForUpdateNotification() {
+    NotificationCenter.default.post(
+      name: Notification.Name(AppController.CheckForUpdateNotificationName),
+      object: nil
+    )
+  }
+
+  // MARK: - Notifications for UpdateEvents
+
+  private func initializeUpdateEventNotificationHandler() {
+    // Use notifications to allow other parts of expo-updates to send UpdateEvents
+    NotificationCenter.default.addObserver(self, selector: #selector(handleUpdateEventNotification(notification:)), name: Notification.Name(AppController.UpdateEventNotificationName), object: nil)
+  }
+
+  public func handleUpdateEventNotification(notification: Notification) {
+    guard let body = notification.userInfo?["body"] as? [AnyHashable: Any],
+      let type = notification.userInfo?["type"] as? String else {
+      return
+    }
+    UpdatesUtils.sendEvent(toBridge: bridge, withType: type, body: body)
+  }
+
+  public func postUpdateEventNotification(_ type: String, body: [AnyHashable: Any] = [:]) {
+    NotificationCenter.default.post(
+      name: Notification.Name(AppController.UpdateEventNotificationName),
+      object: nil,
+      userInfo: ["type": type, "body": body]
+    )
   }
 
   // MARK: - AppLoaderTaskDelegate

@@ -15,4 +15,10 @@ public final class ExpoUpdatesAppDelegateSubscriber: ExpoAppDelegateSubscriber {
     }
     return true
   }
+
+  public func applicationWillEnterForeground(_ application: UIApplication) {
+    DispatchQueue.main.asyncAfter(deadline: .now() + 1.0, execute: {
+      AppController.sharedInstance.postCheckForUpdateNotification()
+    })
+  }
 }
