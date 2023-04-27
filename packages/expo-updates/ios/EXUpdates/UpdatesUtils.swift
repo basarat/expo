@@ -3,6 +3,7 @@
 // swiftlint:disable force_unwrapping
 // swiftlint:disable type_body_length
 // swiftlint:disable function_body_length
+// swiftlint:disable closure_body_length
 
 import Foundation
 import SystemConfiguration
@@ -21,41 +22,8 @@ internal extension Array where Element: Equatable {
 @objc(EXUpdatesUtils)
 @objcMembers
 public final class UpdatesUtils: NSObject {
-  private static let EXUpdatesEventName = "Expo.nativeUpdatesEvent"
   private static let EXUpdatesUtilsErrorDomain = "EXUpdatesUtils"
   public static let methodQueue = DispatchQueue(label: "expo.modules.EXUpdatesQueue")
-
-  internal static func runBlockOnMainThread(_ block: @escaping () -> Void) {
-    if Thread.isMainThread {
-      block()
-    } else {
-      DispatchQueue.main.async {
-        block()
-      }
-    }
-  }
-
-  internal static func hexEncodedSHA256WithData(_ data: Data) -> String {
-    var digest = [UInt8](repeating: 0, count: Int(CC_SHA256_DIGEST_LENGTH))
-    data.withUnsafeBytes { bytes in
-      _ = CC_SHA256(bytes.baseAddress, CC_LONG(data.count), &digest)
-    }
-    return digest.reduce("") { $0 + String(format: "%02x", $1) }
-  }
-
-  internal static func base64UrlEncodedSHA256WithData(_ data: Data) -> String {
-    var digest = [UInt8](repeating: 0, count: Int(CC_SHA256_DIGEST_LENGTH))
-    data.withUnsafeBytes { bytes in
-      _ = CC_SHA256(bytes.baseAddress, CC_LONG(data.count), &digest)
-    }
-    let base64EncodedDigest = Data(digest).base64EncodedString()
-
-    // ref. https://datatracker.ietf.org/doc/html/rfc4648#section-5
-    return base64EncodedDigest
-      .trimmingCharacters(in: CharacterSet(charactersIn: "=")) // remove extra padding
-      .replacingOccurrences(of: "+", with: "-") // replace "+" character w/ "-"
-      .replacingOccurrences(of: "/", with: "_") // replace "/" character w/ "_"
-  }
 
   public static func initializeUpdatesDirectory() throws -> URL {
     let fileManager = FileManager.default
@@ -83,172 +51,139 @@ public final class UpdatesUtils: NSObject {
   }
 
   public static func checkForUpdate(_ updatesService: (any EXUpdatesModuleInterface)?, _ block: @escaping ([String: Any]) -> Void) {
-    let maybeConfig: UpdatesConfig? = updatesService?.config ?? AppController.sharedInstance.config
-    let maybeSelectionPolicy: SelectionPolicy? = updatesService?.selectionPolicy ?? AppController.sharedInstance.selectionPolicy()
-    let maybeIsStarted: Bool? = updatesService?.isStarted ?? AppController.sharedInstance.isStarted
+    do {
+      let constants = try startAPICall(updatesService)
 
-    guard let config = maybeConfig,
-      let selectionPolicy = maybeSelectionPolicy,
-      config.isEnabled
-    else {
-      block(["message": UpdatesDisabledException().localizedDescription])
-      return
-    }
-    guard maybeIsStarted ?? false else {
-      block(["message": UpdatesNotInitializedException().localizedDescription])
-      return
-    }
-
-    let database = updatesService?.database ?? AppController.sharedInstance.database
-    let launchedUpdate = updatesService?.launchedUpdate ?? AppController.sharedInstance.launchedUpdate()
-    let embeddedUpdate = updatesService?.embeddedUpdate ?? EmbeddedAppLoader.embeddedManifest(withConfig: config, database: database)
-
-    var extraHeaders: [String: Any] = [:]
-    database.databaseQueue.sync {
-      extraHeaders = FileDownloader.extraHeadersForRemoteUpdateRequest(
-        withDatabase: database,
-        config: config,
-        launchedUpdate: launchedUpdate,
-        embeddedUpdate: embeddedUpdate
-      )
-    }
-
-    let fileDownloader = FileDownloader(config: config)
-    fileDownloader.downloadRemoteUpdate(
-      // swiftlint:disable:next force_unwrapping
-      fromURL: config.updateUrl!,
-      withDatabase: database,
-      extraHeaders: extraHeaders
-    ) { updateResponse in
-      guard let update = updateResponse.manifestUpdateResponsePart?.updateManifest else {
-        postUpdateEventNotification(AppController.NoUpdateAvailableEventName)
-        block([:])
-        return
+      var extraHeaders: [String: Any] = [:]
+      constants.database.databaseQueue.sync {
+        extraHeaders = FileDownloader.extraHeadersForRemoteUpdateRequest(
+          withDatabase: constants.database,
+          config: constants.config,
+          launchedUpdate: constants.launchedUpdate,
+          embeddedUpdate: constants.embeddedUpdate
+        )
       }
 
-      let launchedUpdate = launchedUpdate
-      if selectionPolicy.shouldLoadNewUpdate(update, withLaunchedUpdate: launchedUpdate, filters: updateResponse.responseHeaderData?.manifestFilters) {
-        let body = [
-          "manifest": update.manifest.rawManifestJSON()
-        ]
-        block(body)
-        postUpdateEventNotification(AppController.UpdateAvailableEventName, body: body)
-      } else {
-        block([:])
-        postUpdateEventNotification(AppController.NoUpdateAvailableEventName)
+      let fileDownloader = FileDownloader(config: constants.config)
+      fileDownloader.downloadRemoteUpdate(
+        // swiftlint:disable:next force_unwrapping
+        fromURL: constants.config.updateUrl!,
+        withDatabase: constants.database,
+        extraHeaders: extraHeaders
+      ) { updateResponse in
+        guard let update = updateResponse.manifestUpdateResponsePart?.updateManifest else {
+          postUpdateEventNotification(AppController.NoUpdateAvailableEventName)
+          block([:])
+          return
+        }
+
+        if constants.selectionPolicy.shouldLoadNewUpdate(
+          update,
+          withLaunchedUpdate: constants.launchedUpdate,
+          filters: updateResponse.responseHeaderData?.manifestFilters
+        ) {
+          let body = [
+            "manifest": update.manifest.rawManifestJSON()
+          ]
+          block(body)
+          postUpdateEventNotification(AppController.UpdateAvailableEventName, body: body)
+        } else {
+          block([:])
+          postUpdateEventNotification(AppController.NoUpdateAvailableEventName)
+        }
+      } errorBlock: { error in
+        handleAPIError(error, block: block)
       }
-    } errorBlock: { error in
-      let body = ["message": error.localizedDescription]
-      block(body)
-      postUpdateEventNotification(AppController.ErrorEventName, body: body)
+    } catch {
+      handleAPIError(error, block: block)
     }
   }
 
   public static func fetchUpdate(_ updatesService: (any EXUpdatesModuleInterface)?, _ block: @escaping ([String: Any]) -> Void) {
     postUpdateEventNotification(AppController.DownloadStartEventName)
-    guard let updatesService = updatesService,
-      let config = updatesService.config,
-      let selectionPolicy = updatesService.selectionPolicy,
-      config.isEnabled else {
-      let body = ["message": UpdatesDisabledException().localizedDescription]
-      block(body)
-      postUpdateEventNotification(AppController.ErrorEventName, body: body)
-      return
-    }
-    guard updatesService.isStarted else {
-      let body = ["message": UpdatesNotInitializedException().localizedDescription]
-      block(body)
-      postUpdateEventNotification(AppController.ErrorEventName, body: body)
-      return
-    }
+    do {
+      let constants = try startAPICall(updatesService)
+      let remoteAppLoader = RemoteAppLoader(
+        config: constants.config,
+        database: constants.database,
+        directory: constants.directory,
+        launchedUpdate: constants.launchedUpdate,
+        completionQueue: methodQueue
+      )
+      remoteAppLoader.loadUpdate(
+        // swiftlint:disable:next force_unwrapping
+        fromURL: constants.config.updateUrl!
+      ) { updateResponse in
+        if let updateDirective = updateResponse.directiveUpdateResponsePart?.updateDirective {
+          switch updateDirective {
+          case is NoUpdateAvailableUpdateDirective:
+            return false
+          case is RollBackToEmbeddedUpdateDirective:
+            return true
+          default:
+            NSException(name: .internalInconsistencyException, reason: "Unhandled update directive type").raise()
+            return false
+          }
+        }
 
-    let remoteAppLoader = RemoteAppLoader(
-      config: config,
-      database: updatesService.database,
-      directory: updatesService.directory,
-      launchedUpdate: updatesService.launchedUpdate,
-      completionQueue: methodQueue
-    )
-    remoteAppLoader.loadUpdate(
-      // swiftlint:disable:next force_unwrapping
-      fromURL: config.updateUrl!
-    ) { updateResponse in
-      if let updateDirective = updateResponse.directiveUpdateResponsePart?.updateDirective {
-        switch updateDirective {
-        case is NoUpdateAvailableUpdateDirective:
-          return false
-        case is RollBackToEmbeddedUpdateDirective:
-          return true
-        default:
-          NSException(name: .internalInconsistencyException, reason: "Unhandled update directive type").raise()
+        guard let update = updateResponse.manifestUpdateResponsePart?.updateManifest else {
           return false
         }
-      }
-
-      guard let update = updateResponse.manifestUpdateResponsePart?.updateManifest else {
-        return false
-      }
-
-      return selectionPolicy.shouldLoadNewUpdate(
-        update,
-        withLaunchedUpdate: updatesService.launchedUpdate,
-        filters: updateResponse.responseHeaderData?.manifestFilters
-      )
-    } asset: { asset, successfulAssetCount, failedAssetCount, totalAssetCount in
-      postUpdateEventNotification(AppController.DownloadAssetEventName, body: [
-        "assetInfo": [
-          "assetName": asset.filename,
-          "successfulAssetCount": successfulAssetCount,
-          "failedAssetCount": failedAssetCount,
-          "totalAssetCount": totalAssetCount
-        ]
-      ])
-    } success: { updateResponse in
-      if updateResponse?.directiveUpdateResponsePart?.updateDirective is RollBackToEmbeddedUpdateDirective {
-        let body = [
-          "isNew": false,
-          "isRollBackToEmbedded": true
-        ]
-        block(body)
-        postUpdateEventNotification(AppController.DownloadCompleteEventName, body: body)
-        return
-      } else {
-        if let update = updateResponse?.manifestUpdateResponsePart?.updateManifest {
-          updatesService.resetSelectionPolicy()
+        let result = constants.selectionPolicy.shouldLoadNewUpdate(
+          update,
+          withLaunchedUpdate: constants.launchedUpdate,
+          filters: updateResponse.responseHeaderData?.manifestFilters
+        )
+        return result
+      } asset: { asset, successfulAssetCount, failedAssetCount, totalAssetCount in
+        postUpdateEventNotification(AppController.DownloadAssetEventName, body: [
+          "assetInfo": [
+            "assetName": asset.filename,
+            "successfulAssetCount": successfulAssetCount,
+            "failedAssetCount": failedAssetCount,
+            "totalAssetCount": totalAssetCount
+          ]
+        ])
+      } success: { updateResponse in
+        if updateResponse?.directiveUpdateResponsePart?.updateDirective is RollBackToEmbeddedUpdateDirective {
           let body = [
-            "isNew": true,
-            "isRollBackToEmbedded": false,
-            "manifest": update.manifest.rawManifestJSON()
+            "isNew": false,
+            "isRollBackToEmbedded": true
           ]
           block(body)
           postUpdateEventNotification(AppController.DownloadCompleteEventName, body: body)
           return
         } else {
-          let body = [
-            "isNew": false,
-            "isRollBackToEmbedded": false
-          ]
-          block(body)
-          postUpdateEventNotification(AppController.DownloadCompleteEventName, body: body)
-          return
+          if let update = updateResponse?.manifestUpdateResponsePart?.updateManifest {
+            if updatesService != nil {
+              updatesService?.resetSelectionPolicy()
+            } else {
+              AppController.sharedInstance.resetSelectionPolicyToDefault()
+            }
+            let body = [
+              "isNew": true,
+              "isRollBackToEmbedded": false,
+              "manifest": update.manifest.rawManifestJSON()
+            ]
+            block(body)
+            postUpdateEventNotification(AppController.DownloadCompleteEventName, body: body)
+            return
+          } else {
+            let body = [
+              "isNew": false,
+              "isRollBackToEmbedded": false
+            ]
+            block(body)
+            postUpdateEventNotification(AppController.DownloadCompleteEventName, body: body)
+            return
+          }
         }
+      } error: { error in
+        handleAPIError(error, block: block)
       }
-    } error: { error in
-      let body = ["message": "Failed to download new update: \(error.localizedDescription)"]
-      block(body)
-      postUpdateEventNotification(AppController.ErrorEventName, body: body)
+    } catch {
+      handleAPIError(error, block: block)
     }
-  }
-
-  internal static func sendEvent(toBridge bridge: RCTBridge?, withType eventType: String, body: [AnyHashable: Any]) {
-    guard let bridge = bridge else {
-      NSLog("EXUpdates: Could not emit %@ event. Did you set the bridge property on the controller singleton?", eventType)
-      return
-    }
-
-    var mutableBody = body
-    mutableBody["type"] = eventType
-    bridge.enqueueJSCall("RCTDeviceEventEmitter.emit", args: [EXUpdatesEventName, mutableBody])
   }
 
   internal static func shouldCheckForUpdate(withConfig config: UpdatesConfig) -> Bool {
@@ -273,9 +208,7 @@ public final class UpdatesUtils: NSObject {
     }
   }
 
-  internal static func postUpdateEventNotification(_ type: String, body: [AnyHashable: Any] = [:]) {
-    AppController.sharedInstance.postUpdateEventNotification(type, body: body)
-  }
+  // MARK: - Internal methods
 
   internal static func getRuntimeVersion(withConfig config: UpdatesConfig) -> String {
     // various places in the code assume that we have a nonnull runtimeVersion, so if the developer
@@ -315,5 +248,94 @@ public final class UpdatesUtils: NSObject {
     #else
     return false
     #endif
+  }
+
+  internal static func runBlockOnMainThread(_ block: @escaping () -> Void) {
+    if Thread.isMainThread {
+      block()
+    } else {
+      DispatchQueue.main.async {
+        block()
+      }
+    }
+  }
+
+  internal static func hexEncodedSHA256WithData(_ data: Data) -> String {
+    var digest = [UInt8](repeating: 0, count: Int(CC_SHA256_DIGEST_LENGTH))
+    data.withUnsafeBytes { bytes in
+      _ = CC_SHA256(bytes.baseAddress, CC_LONG(data.count), &digest)
+    }
+    return digest.reduce("") { $0 + String(format: "%02x", $1) }
+  }
+
+  internal static func base64UrlEncodedSHA256WithData(_ data: Data) -> String {
+    var digest = [UInt8](repeating: 0, count: Int(CC_SHA256_DIGEST_LENGTH))
+    data.withUnsafeBytes { bytes in
+      _ = CC_SHA256(bytes.baseAddress, CC_LONG(data.count), &digest)
+    }
+    let base64EncodedDigest = Data(digest).base64EncodedString()
+
+    // ref. https://datatracker.ietf.org/doc/html/rfc4648#section-5
+    return base64EncodedDigest
+      .trimmingCharacters(in: CharacterSet(charactersIn: "=")) // remove extra padding
+      .replacingOccurrences(of: "+", with: "-") // replace "+" character w/ "-"
+      .replacingOccurrences(of: "/", with: "_") // replace "/" character w/ "_"
+  }
+
+  // MARK: - Private methods to support checkForUpdate(), fetchUpdate()
+
+  private static func postUpdateEventNotification(_ type: String, body: [AnyHashable: Any] = [:]) {
+    AppController.sharedInstance.postUpdateEventNotification(type, body: body)
+  }
+
+  /**
+   If an error occurs in API implementations, call the completion handler and
+   also fire a notification to surface the error to JS
+   */
+  private static func handleAPIError(_ error: Error, block: @escaping ([String: Any]) -> Void) {
+    let body = ["message": error.localizedDescription]
+    block(body)
+    postUpdateEventNotification(AppController.ErrorEventName, body: body)
+  }
+
+  /**
+   Code that runs at the start of both checkForUpdate and fetchUpdate, to do sanity
+   checks and return the config, selection policy, database, etc.
+   When called from JS, the UpdatesService object will be passed in.
+   When called from the AppController notification handler (e.g. doing a check for
+   update on coming to the foreground), a nil object is passed in, in which case we
+   return the results directly from the AppController.
+   */
+  private static func startAPICall(
+    _ updatesService: (any EXUpdatesModuleInterface)?
+  ) throws -> (
+    config: UpdatesConfig,
+    selectionPolicy: SelectionPolicy,
+    database: UpdatesDatabase,
+    directory: URL,
+    launchedUpdate: Update?,
+    embeddedUpdate: Update?
+  ) {
+    let maybeConfig: UpdatesConfig? = updatesService?.config ?? AppController.sharedInstance.config
+    let maybeSelectionPolicy: SelectionPolicy? = updatesService?.selectionPolicy ?? AppController.sharedInstance.selectionPolicy()
+    let maybeIsStarted: Bool? = updatesService?.isStarted ?? AppController.sharedInstance.isStarted
+
+    guard let config = maybeConfig,
+      let selectionPolicy = maybeSelectionPolicy,
+      config.isEnabled
+    else {
+      throw UpdatesDisabledException()
+    }
+    guard maybeIsStarted ?? false else {
+      throw UpdatesNotInitializedException()
+    }
+
+    let database = updatesService?.database ?? AppController.sharedInstance.database
+    let launchedUpdate = updatesService?.launchedUpdate ?? AppController.sharedInstance.launchedUpdate()
+    let embeddedUpdate = updatesService?.embeddedUpdate ?? EmbeddedAppLoader.embeddedManifest(withConfig: config, database: database)
+    guard let directory = updatesService?.directory ?? AppController.sharedInstance.updatesDirectory else {
+      throw UpdatesNotInitializedException()
+    }
+    return (config, selectionPolicy, database, directory, launchedUpdate, embeddedUpdate)
   }
 }

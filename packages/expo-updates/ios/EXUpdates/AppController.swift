@@ -36,6 +36,7 @@ public protocol AppControllerDelegate: AnyObject {
 @objcMembers
 public class AppController: NSObject, AppLoaderTaskDelegate, ErrorRecoveryDelegate {
   private static let ErrorDomain = "EXUpdatesAppController"
+  private static let EXUpdatesEventName = "Expo.nativeUpdatesEvent"
 
   public static let UpdateAvailableEventName = "updateAvailable"
   public static let NoUpdateAvailableEventName = "noUpdateAvailable"
@@ -341,8 +342,15 @@ public class AppController: NSObject, AppLoaderTaskDelegate, ErrorRecoveryDelega
     NotificationCenter.default.addObserver(self, selector: #selector(handleCheckForUpdateNotification(notification:)), name: Notification.Name(AppController.CheckForUpdateNotificationName), object: nil)
   }
 
+  // Testing out the possibility of checking for and downloading updates when app
+  // comes to the foreground
   public func handleCheckForUpdateNotification(notification: Notification) {
-    UpdatesUtils.checkForUpdate(nil) { _ in }
+    UpdatesUtils.checkForUpdate(nil) { result in
+      if result["manifest"] != nil {
+        UpdatesUtils.fetchUpdate(nil) { _ in
+        }
+      }
+    }
   }
 
   public func postCheckForUpdateNotification() {
@@ -364,7 +372,7 @@ public class AppController: NSObject, AppLoaderTaskDelegate, ErrorRecoveryDelega
       let type = notification.userInfo?["type"] as? String else {
       return
     }
-    UpdatesUtils.sendEvent(toBridge: bridge, withType: type, body: body)
+    sendEventToBridge(type, body: body)
   }
 
   public func postUpdateEventNotification(_ type: String, body: [AnyHashable: Any] = [:]) {
@@ -434,11 +442,9 @@ public class AppController: NSObject, AppLoaderTaskDelegate, ErrorRecoveryDelega
         updateId: update?.loggingId(),
         assetId: nil
       )
-      UpdatesUtils.sendEvent(
-        toBridge: bridge,
-        withType: AppController.ErrorEventName,
-        body: ["message": error.localizedDescription]
-      )
+      sendEventToBridge(AppController.ErrorEventName, body: [
+        "message": error.localizedDescription
+      ])
     case .updateAvailable:
       remoteLoadStatus = .NewUpdateLoaded
       guard let update = update else {
@@ -450,13 +456,9 @@ public class AppController: NSObject, AppLoaderTaskDelegate, ErrorRecoveryDelega
         updateId: update.loggingId(),
         assetId: nil
       )
-      UpdatesUtils.sendEvent(
-        toBridge: bridge,
-        withType: AppController.UpdateAvailableEventName,
-        body: [
-          "manifest": update.manifest.rawManifestJSON()
-        ]
-      )
+      sendEventToBridge(AppController.UpdateAvailableEventName, body: [
+        "manifest": update.manifest.rawManifestJSON()
+      ])
     case .noUpdateAvailable:
       remoteLoadStatus = .Idle
       logger.error(
@@ -465,7 +467,7 @@ public class AppController: NSObject, AppLoaderTaskDelegate, ErrorRecoveryDelega
         updateId: update?.loggingId(),
         assetId: nil
       )
-      UpdatesUtils.sendEvent(toBridge: bridge, withType: AppController.NoUpdateAvailableEventName, body: [:])
+      sendEventToBridge(AppController.NoUpdateAvailableEventName, body: [:])
     }
 
     errorRecovery.notify(newRemoteLoadStatus: remoteLoadStatus)
@@ -514,6 +516,35 @@ public class AppController: NSObject, AppLoaderTaskDelegate, ErrorRecoveryDelega
         launchedUpdate: launchedUpdate
       )
     }
+  }
+
+  internal func sendEventToBridge(_ eventType: String, body: [AnyHashable: Any]) {
+    guard let bridge = bridge else {
+      NSLog("EXUpdates: Could not emit %@ event. Did you set the bridge property on the controller singleton?", eventType)
+      return
+    }
+
+    var mutableBody = body
+    mutableBody["type"] = eventType
+    bridge.enqueueJSCall("RCTDeviceEventEmitter.emit", args: [AppController.EXUpdatesEventName, mutableBody])
+  }
+
+  private func emergencyLaunch(fatalError error: NSError) {
+    isEmergencyLaunch = true
+
+    let launcherNoDatabase = AppLauncherNoDatabase()
+    launcher = launcherNoDatabase
+    launcherNoDatabase.launchUpdate(withConfig: config)
+
+    delegate.let { _ in
+      DispatchQueue.main.async { [weak self] in
+        if let strongSelf = self {
+          strongSelf.delegate?.appController(strongSelf, didStartWithSuccess: strongSelf.launchAssetUrl() != nil)
+        }
+      }
+    }
+
+    errorRecovery.writeErrorOrExceptionToLog(error)
   }
 
   // MARK: - ErrorRecoveryDelegate
@@ -629,25 +660,5 @@ public class AppController: NSObject, AppLoaderTaskDelegate, ErrorRecoveryDelega
 
   public func throwException(_ exception: NSException) {
     exception.raise()
-  }
-
-  // MARK: - internal
-
-  private func emergencyLaunch(fatalError error: NSError) {
-    isEmergencyLaunch = true
-
-    let launcherNoDatabase = AppLauncherNoDatabase()
-    launcher = launcherNoDatabase
-    launcherNoDatabase.launchUpdate(withConfig: config)
-
-    delegate.let { _ in
-      DispatchQueue.main.async { [weak self] in
-        if let strongSelf = self {
-          strongSelf.delegate?.appController(strongSelf, didStartWithSuccess: strongSelf.launchAssetUrl() != nil)
-        }
-      }
-    }
-
-    errorRecovery.writeErrorOrExceptionToLog(error)
   }
 }
