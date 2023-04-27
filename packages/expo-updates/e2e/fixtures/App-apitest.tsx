@@ -48,8 +48,8 @@ export default function App() {
     if (checkResult.isAvailable) {
       setUpdateMessage(
         `checkForUpdateAsync found a new update: manifest = \n${manifestToString(
-          checkResult.manifest
-        )}...`
+          checkResult.manifest,
+        )}...`,
       );
     } else {
       setUpdateMessage('No new update available');
@@ -63,15 +63,6 @@ export default function App() {
   const downloadAndRunUpdate = async () => {
     setUpdateMessage('Downloading the new update...');
     await Updates.fetchUpdateAsync();
-    let countdown = 10;
-    while (countdown > 0) {
-      setUpdateMessage(
-        `Downloaded update... launching it in ${countdown} seconds.`,
-      );
-      countdown = countdown - 1;
-      await delay(1000);
-    }
-    await Updates.reloadAsync();
   };
 
   /**
@@ -87,11 +78,25 @@ export default function App() {
     } else if (event.type === Updates.UpdateEventType.NO_UPDATE_AVAILABLE) {
       setUpdateMessage('No new update available');
     } else if (event.type === Updates.UpdateEventType.UPDATE_AVAILABLE) {
-      setUpdateMessage(`New update available\n${manifestToString(event.manifest)}`);
+      setUpdateMessage(
+        `New update available\n${manifestToString(event.manifest)}`,
+      );
       setUpdateAvailable(true);
     }
   };
   Updates.useUpdateEvents(eventListener);
+
+  const runNow = async () => {
+    let countdown = 10;
+    while (countdown > 0) {
+      setUpdateMessage(
+        `Downloaded update... launching it in ${countdown} seconds.`,
+      );
+      countdown = countdown - 1;
+      await delay(1000);
+    }
+    await Updates.reloadAsync();
+  };
 
   const handleCheckButtonPress = () => {
     checkManuallyForUpdate().catch((error) => {
@@ -101,7 +106,9 @@ export default function App() {
 
   const handleDownloadButtonPress = () => {
     downloadAndRunUpdate().catch((error) => {
-      setUpdateMessage(`Error downloading and running update: ${error.message}`);
+      setUpdateMessage(
+        `Error downloading and running update: ${error.message}`,
+      );
     });
   };
 
@@ -121,7 +128,12 @@ export default function App() {
       </Pressable>
       {updateAvailable ? (
         <Pressable style={styles.button} onPress={handleDownloadButtonPress}>
-          <Text style={styles.buttonText}>Download and run update</Text>
+          <Text style={styles.buttonText}>Download update</Text>
+        </Pressable>
+      ) : null}
+      {updateAvailable ? (
+        <Pressable style={styles.button} onPress={runNow}>
+          <Text style={styles.buttonText}>Run update</Text>
         </Pressable>
       ) : null}
       <StatusBar style="auto" />
@@ -186,7 +198,7 @@ const manifestToString = (manifest?: Updates.Manifest) => {
           metadata: manifest.metadata,
         },
         null,
-        2
+        2,
       )
     : 'null';
 };
