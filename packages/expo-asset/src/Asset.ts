@@ -58,8 +58,8 @@ export class Asset {
    * of your app, this refers to the location on Expo's asset server where Expo has stored your
    * asset. When running the app from Expo CLI during development, this URI points to Expo CLI's
    * server running on your computer and the asset is served directly from your computer. If you
-   * are using EAS, this field should be ignored as we ensure your assets are on device before
-   * before running your application logic.
+   * are not using Classic Updates (legacy), this field should be ignored as we ensure your assets 
+   * are on device before before running your application logic.
    */
   uri: string;
   /**
